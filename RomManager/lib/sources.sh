@@ -3,7 +3,7 @@
 #
 # Repos live in repos.txt (editable on a PC), one per line:
 #     CONSOLE | SOURCE | FORMAT
-# CONSOLE is an Onion ROM folder (GBA, PS, ...) or * for a multi-console pack.
+# CONSOLE is a spruce ROM folder (GBA, PS, ...) or * for a multi-console pack.
 # SOURCE is an archive.org item ID, an http(s):// folder, or an ftp:// folder.
 # FORMAT (optional) adds file extensions to look for, e.g. "chd" or "iso|cso".
 #
@@ -118,7 +118,7 @@ repos_write_header() {
     cat > "$REPOS_FILE" <<'EOF'
 # RomManager repositories - one per line:   CONSOLE | SOURCE | FORMAT
 #
-#   CONSOLE  Onion ROM folder name (GBA, PS, FC, SFC, MD, ...) or * for a pack that
+#   CONSOLE  spruce ROM folder name (GBA, PS, FC, SFC, MD, ...) or * for a pack that
 #            holds several consoles in subfolders (they're detected automatically).
 #   SOURCE   an archive.org item ID (the part after archive.org/details/), or a folder:
 #              https://example.com/roms/gba/
@@ -139,9 +139,10 @@ migrate_archives() {
     tr -d '\r' < archives.txt | awk -F'|' '$3 != "" { print $2 " | " $3 (($4 != "") ? " | " $4 : "") }' >> "$REPOS_FILE"
 }
 
-# Earlier versions used some ROM folder names Onion doesn't (SMS instead of MS, ...),
-# so games went to folders Onion never shows. Renames them in repos.txt and saved packs.
-CONSOLE_RENAMES='SMS=MS ATARI2600=ATARI ATARI7800=SEVENTYEIGHTHUNDRED FIFTYTWO00=FIFTYTWOHUNDRED ATARILYNX=LYNX 32X=THIRTYTWOX POKEFAMI=POKE C64=COMMODORE TIC80=TIC NGPC=NGP WSC=WS MSX2=MSX'
+# Earlier versions used some ROM folder names spruce doesn't (SMS instead of MS, ...),
+# so games went to folders spruce never shows. Renames them in repos.txt and saved
+# packs. (spruce keeps NGPC and WSC apart from NGP and WS; Onion's PICO is PICO8.)
+CONSOLE_RENAMES='SMS=MS ATARI2600=ATARI ATARI7800=SEVENTYEIGHTHUNDRED FIFTYTWO00=FIFTYTWOHUNDRED ATARILYNX=LYNX 32X=THIRTYTWOX POKEFAMI=POKE C64=COMMODORE TIC80=TIC MSX2=MSX PICO=PICO8'
 migrate_console_codes() {
     local f
     for f in "$REPOS_FILE" "$PACKS_DIR"/*.map; do
@@ -155,11 +156,7 @@ migrate_console_codes() {
             }
             /^[ \t]*#/ || NF < 2 { print; next }
             {
-                if (FILENAME ~ /\.map$/) {
-                    $2 = fix($2)
-                    # Consoles Onion has no emulator for on the Mini: skip them in packs
-                    if ($2 == "N64" || $2 == "DC" || $2 == "PSP") $2 = "-"
-                }
+                if (FILENAME ~ /\.map$/) $2 = fix($2)
                 else $1 = fix($1)
                 out = $1; for (i = 2; i <= NF; i++) out = out "|" $i; print out
             }' "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
@@ -517,11 +514,11 @@ console_ext_regex() {
     echo "$regex"
 }
 
-# Onion folder for a pack's subfolder name, from its name ("GBA", "Game Boy Advance",
+# spruce folder for a pack's subfolder name, from its name ("GBA", "Game Boy Advance",
 # "Nintendo - Game Boy Advance", ...). Prints nothing if it's not recognised.
 # Also copes with "(Update 1)"-style notes, a ".zip" ending, and a maker's name in
 # front ("Sony - PS1", "Sega - Sega CD", "Arcade - Mame 2003 Plus").
-# Prints the Onion folder, or "!Name" for a console the Miyoo Mini can't run.
+# Prints the spruce folder, or "!Name" for a console spruce can't run on the Brick.
 folder_lookup() {
     awk -F'|' -v name="$1" '
         function key(s) { s = tolower(s); gsub(/[^a-z0-9]/, "", s); return s }
@@ -541,7 +538,7 @@ SFC|sfc|snes|superfamicom|supernintendo|supernintendoentertainmentsystem|nintend
 GB|gb|gameboy|nintendogameboy
 GBC|gbc|gameboycolor|gameboycolour|nintendogameboycolor
 GBA|gba|gameboyadvance|nintendogameboyadvance
-!N64|n64|nintendo64|nintendonintendo64
+N64|n64|nintendo64|nintendonintendo64
 NDS|nds|ds|nintendods|nintendonintendods
 VB|vb|virtualboy|nintendovirtualboy
 FDS|fds|famicomdisksystem|nintendofamicomdisksystem
@@ -551,18 +548,18 @@ MS|ms|sms|mastersystem|segamastersystem|segamastersystemmarkiii
 GG|gg|gamegear|segagamegear
 SEGACD|segacd|megacd|segamegacd|segamegacdsegacd
 THIRTYTWOX|32x|sega32x|thirtytwox
-!Dreamcast|dc|dreamcast|segadreamcast
+DC|dc|dreamcast|segadreamcast
 PS|ps|ps1|psx|playstation|playstation1|sonyplaystation
-!PSP|psp|playstationportable|sonyplaystationportable
+PSP|psp|playstationportable|sonyplaystationportable
 PCE|pce|pcengine|turbografx|turbografx16|tg16|necpcengine|necpcenginetg16|necpcengineturbografx16
 PCECD|pcecd|pcenginecd|turbografxcd|necpcenginecdturbografxcd
 PCFX|pcfx|necpcfx
 NEOGEO|neogeo|snkneogeo
 NEOCD|neocd|neogeocd|snkneogeocd
 NGP|ngp|neogeopocket|snkneogeopocket
-NGP|ngpc|neogeopocketcolor|snkneogeopocketcolor
+NGPC|ngpc|neogeopocketcolor|snkneogeopocketcolor
 WS|ws|wonderswan|bandaiwonderswan
-WS|wsc|wonderswancolor|bandaiwonderswancolor
+WSC|wsc|wonderswancolor|bandaiwonderswancolor
 ATARI|atari2600|a2600|2600
 SEVENTYEIGHTHUNDRED|atari7800|a7800|7800|seventyeighthundred
 FIFTYTWOHUNDRED|atari5200|a5200|5200|fiftytwo00|fiftytwohundred
@@ -576,7 +573,7 @@ MSX|msx2|microsoftmsx2
 COMMODORE|c64|commodore64|commodore
 AMIGA|amiga|commodoreamiga
 DOS|dos|msdos
-PICO|pico|pico8
+PICO8|pico|pico8
 TIC|tic80|tic
 VECTREX|vectrex|gcevectrex
 SATELLAVIEW|satellaview|nintendosatellaview
@@ -609,7 +606,8 @@ ATARIST|atarist
 !PS Vita|psvita|vita|playstationvita|sonyplaystationvita
 !Xbox|xbox|microsoftxbox
 !Xbox 360|xbox360|microsoftxbox360
-!Saturn|saturn|segasaturn
+SATURN|saturn|segasaturn
+JAGUAR|jaguar|atarijaguar
 EOF
 }
 
@@ -618,24 +616,24 @@ console_for_folder() {
     case "$r" in "!"*) ;; *) echo "$r" ;; esac
 }
 
-# Name of a console the Miyoo Mini can't run ("GameCube"), or nothing.
+# Name of a console spruce can't run ("GameCube"), or nothing.
 console_incompatible() {
     local r=$(folder_lookup "$1")
     case "$r" in "!"*) echo "${r#!}" ;; esac
 }
 
-# Onion folder for an unambiguous game file extension ("!Name": a console the Miyoo
-# Mini can't run).
+# spruce folder for an unambiguous game file extension ("!Name": a console spruce
+# can't run).
 console_for_ext() {
     case "$(echo "$1" | tr 'A-Z' 'a-z')" in
         nes) echo FC ;; smc|sfc) echo SFC ;; gb) echo GB ;; gbc) echo GBC ;; gba) echo GBA ;;
         nds) echo NDS ;; vb) echo VB ;; fds) echo FDS ;; min) echo POKE ;;
         md|gen|smd) echo MD ;; sms) echo MS ;; gg) echo GG ;; 32x) echo THIRTYTWOX ;;
-        pce) echo PCE ;; ngp|ngc) echo NGP ;; ws|wsc) echo WS ;; sg) echo SEGASGONE ;;
+        pce) echo PCE ;; ngp) echo NGP ;; ngc) echo NGPC ;; ws) echo WS ;; wsc) echo WSC ;; sg) echo SEGASGONE ;;
         a26) echo ATARI ;; a78) echo SEVENTYEIGHTHUNDRED ;; a52) echo FIFTYTWOHUNDRED ;; lnx) echo LYNX ;;
-        p8) echo PICO ;; tic) echo TIC ;; vec) echo VECTREX ;; d64|t64|crt) echo COMMODORE ;; adf|lha) echo AMIGA ;;
+        p8) echo PICO8 ;; tic) echo TIC ;; vec) echo VECTREX ;; d64|t64|crt) echo COMMODORE ;; adf|lha) echo AMIGA ;;
         col) echo COLECO ;; int) echo INTELLIVISION ;; z80|tzx) echo ZXS ;;
-        n64|z64|v64) echo "!N64" ;; cdi|gdi) echo "!Dreamcast" ;; cso) echo "!PSP" ;;
+        n64|z64|v64) echo N64 ;; cdi|gdi) echo DC ;; cso) echo PSP ;; j64|jag) echo JAGUAR ;;
         rvz|gcm) echo "!GameCube" ;; 3ds|cia) echo "!3DS" ;; wbfs) echo "!Wii" ;;
     esac
 }

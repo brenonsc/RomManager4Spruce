@@ -3,21 +3,43 @@ cd /mnt/SDCARD/App/RomManager
 
 # Crash guard: the app runs as a child of this first copy of the script. Errors go to
 # caches/rommanager.log, and if the app ever dies unexpectedly it's logged (with the
-# screen it was on) and started again instead of dropping back to Onion. A normal exit
-# (B on the main menu, or Onion asking it to close) ends it for good.
+# screen it was on) and started again instead of dropping back to spruce. A normal exit
+# (B on the main menu, or spruce asking it to close) ends it for good.
+# Games picked here run from this first copy too (see launch_game), so RomManager is
+# closed while they play and opens again where you were when they end.
 if [ -z "$RM_SUPERVISED" ]; then
     export RM_SUPERVISED=1
     mkdir -p caches
     RM_LOG="caches/rommanager.log"
     # Keep the log small: start a fresh one once it passes ~64KB
-    [ "$(wc -c < "$RM_LOG" 2>/dev/null || echo 0)" -gt 65536 ] && mv -f "$RM_LOG" "$RM_LOG.old"
+    [ "$(wc -c 2>/dev/null < "$RM_LOG" || echo 0)" -gt 65536 ] && mv -f "$RM_LOG" "$RM_LOG.old"
     echo "=== $(date) start" >> "$RM_LOG"
     restarts=0
     while :; do
         sh ./launch.sh "$@" 2>> "$RM_LOG"
         rc=$?
-        killall rmui rmkey rmaudio ffplay 2>/dev/null
+        killall rmui rmkey rmaudio 2>/dev/null
         [ "$rc" -eq 0 ] && exit 0
+        # 76 / 77: a game was picked - play it, then open RomManager again (76) or not
+        if [ "$rc" -eq 76 ] || [ "$rc" -eq 77 ]; then
+            echo "=== $(date) playing: $(cat /tmp/cmd_to_run.sh 2>/dev/null)" >> "$RM_LOG"
+            sh /tmp/cmd_to_run.sh >/dev/null 2>&1
+            # spruce's game switcher (Menu held in the game) removes the game's line:
+            # let spruce show the switcher instead of coming back
+            if [ "$rc" -eq 77 ] || ! grep -q '/Emu/' /tmp/cmd_to_run.sh 2>/dev/null; then
+                rm -f /tmp/rm_app_cmd.sh
+                exit 0
+            fi
+            # spruce's own record of what's running (power off, autoresume) is
+            # RomManager again
+            if [ -s /tmp/rm_app_cmd.sh ]; then
+                cp -f /tmp/rm_app_cmd.sh /tmp/cmd_to_run.sh.rm && mv -f /tmp/cmd_to_run.sh.rm /tmp/cmd_to_run.sh
+                cp -f /tmp/rm_app_cmd.sh "${FLAGS_DIR:-/mnt/SDCARD/spruce/flags}/lastgame.lock" 2>/dev/null
+            fi
+            touch /tmp/rm_return
+            restarts=0
+            continue
+        fi
         # 75: an update was just installed (lib/update.sh) - start the new version
         if [ "$rc" -eq 75 ]; then
             echo "=== $(date) updated, restarting" >> "$RM_LOG"
@@ -35,26 +57,23 @@ fi
 # ==========================================
 # 1. GLOBAL NAMESPACE & CONFIG
 # ==========================================
-export PATH="./bin:/usr/bin:/bin:/sbin:/usr/sbin:$PATH"
-export LD_LIBRARY_PATH="./libs:./bin:/usr/lib:/customer/lib:/config/lib:/lib:$LD_LIBRARY_PATH"
+# (spruce's own tools first - its curl, jq and ffmpeg are in spruce/bin64)
+export PATH="./bin:$PATH:/mnt/SDCARD/spruce/bin64:/usr/bin:/bin:/sbin:/usr/sbin"
 
-RM_VERSION="2.1"
+RM_VERSION="1.0.0"
 UI_FRAME="/tmp/ui_frame.txt"
-# rmui is the new renderer; the original ui_renderer stays as a fallback.
+# rmui draws the screens (src/rmui.c). If it stops running, frames are drawn one at a
+# time with "rmui FRAME".
 UI_RENDERER="./bin/rmui"
-[ -f "$UI_RENDERER" ] || UI_RENDERER="./bin/ui_renderer"
 # Game titles are sent whole: rmui cuts them to fit and scrolls a long highlighted one.
-# The old renderer can't, so it gets them cut to 28 characters.
 ITEM_CHARS=200
-[ "$UI_RENDERER" = "./bin/ui_renderer" ] && ITEM_CHARS=28
-chmod +x ./bin/rmui ./bin/ui_renderer ./bin/rmkey ./bin/rmls ./bin/rmaudio ./bin/getkey 2>/dev/null
+chmod +x ./bin/* 2>/dev/null
 RMUI_FIFO="/tmp/rmui.fifo"
 RMUI_PID=""
 
-# Buttons: rmkey runs in the background and answers "get" requests (see src/rmkey).
-# Without it, a key reader program is started for every press (rmkey, else getkey).
+# Buttons: rmkey runs in the background and answers "get" requests (see src/rmkey.c).
+# Without it, "rmkey -t" is started for every press.
 KEY_READER="./bin/rmkey"
-[ -f "$KEY_READER" ] || KEY_READER="./bin/getkey"
 RMKEY_REQ="/tmp/rmkey.req"
 RMKEY_RESP="/tmp/rmkey.resp"
 RMKEY_PID=""
@@ -92,7 +111,7 @@ PREVIEW_CACHE_MB=40
 START_SCREEN=menu  # what RomManager opens on: menu | installed | last (where you were)
 HOME_STYLE=tiles   # tiles | list
 MOTION=on          # on | off (animations)
-LAUNCHER=1         # 1: games started here (and Onion's game switcher) come back here
+LAUNCHER=1         # 1: games started here come back here
 SHOW_PERF=0        # 1: frames-per-second / CPU readout (settings.ini only)
 DISCLAIMER_SEEN=0
 AUTO_UPDATE=1      # 1: get new versions from GitHub by itself (lib/update.sh)
@@ -190,14 +209,10 @@ init_audio() {
 }
 
 # rmaudio plays the music on a loop and mixes button sounds over it, so pressing a
-# button never pauses the music. The Mini's sound chip takes only one player at a
-# time (that's why the old code had to stop the music for every beep), so rmaudio
-# makes one stream of everything and hands it to a single player:
-#   1. ffplay (Onion ships it, and it's what the old code played the music with),
-#      reading rmaudio's mix through a pipe - known to make sound on Onion
-#   2. /dev/dsp through Onion's libpadsp.so + audioserver (how RetroArch does it)
-# If neither starts, the old players below are used. AUDIO_OUT=dsp in settings.ini
-# tries /dev/dsp first. What happened is written to caches/rommanager.log.
+# button never pauses the music. It makes one stream of everything and hands it to
+# spruce's ffmpeg, which plays it through ALSA (so spruce's volume, Bluetooth and USB
+# audio settings apply). If that doesn't start, the old players below are used.
+# What happened is written to caches/rommanager.log.
 start_audio_mixer() {
     [ -f ./bin/rmaudio ] || return
     local music=""
@@ -205,50 +220,28 @@ start_audio_mixer() {
     # A player left over from an earlier run (or one that got stuck) keeps the sound
     # device, and a new one then waits silently until it lets go - which is how the
     # music could start minutes late. Only one thing plays sound while we're open.
-    killall rmaudio ffplay 2>/dev/null && sleep 0.2
-    # (Stopping Onion's audio server first, as Onion's GMU player does, left no sound
-    # at all - it stays running.) For the log: what we're starting with.
-    local as="no"
-    pidof audioserver >/dev/null 2>&1 && as="yes"
-    echo "audio: starting - ffplay: $(command -v ffplay 2>/dev/null || echo none), Onion audio server running: $as, AUDIO_OUT=$AUDIO_OUT" >&2
+    killall rmaudio 2>/dev/null && sleep 0.2
+    local ffmpeg_cmd=$(command -v ffmpeg 2>/dev/null)
+    echo "audio: starting - ffmpeg: ${ffmpeg_cmd:-none}" >&2
+    [ -n "$ffmpeg_cmd" ] || return
     rm -f "$RMAUDIO_FIFO"
     mkfifo "$RMAUDIO_FIFO" 2>/dev/null || return
-    local ffplay_cmd=$(command -v ffplay 2>/dev/null)
-    local way try t err=/tmp/rm_audio.err
-    # Right after boot the SD card is slow and Onion may still be letting go of the
-    # speaker, so ffplay can take over a second to start - or start and then fail to
-    # open the sound device. Each way is watched for 1.5s (an error or an exit means it
-    # failed) and the pipe gets a few tries before falling back.
-    for way in pipe pipe pipe dsp; do
-        [ "$AUDIO_OUT" = "dsp" ] && [ "$way" = "pipe" ] && continue
+    local try t err=/tmp/rm_audio.err way=pipe
+    # Right after boot the sound device can still be held by spruce's menu, so the
+    # player can fail to open it. Each try is watched for 1.8s (an error or an exit
+    # means it failed) and the pipe gets a few tries before falling back.
+    for try in 1 2 3; do
         : > "$err"
-        case "$way" in
-            pipe)
-                [ -n "$ffplay_cmd" ] || continue
-                # In a subshell so its PID stands for the whole pipeline: it ends
-                # when either side does
-                (
-                    ./bin/rmaudio -d "$RMAUDIO_FIFO" $music -o - </dev/null 2>>"$err" \
-                        | "$ffplay_cmd" -nodisp -autoexit -loglevel error -fflags nobuffer -probesize 32 \
-                            -analyzeduration 0 -f s16le -i pipe:0 >/dev/null 2>>"$err"
-                ) &
-                ;;
-            dsp)
-                [ -f /mnt/SDCARD/miyoo/lib/libpadsp.so ] || continue
-                # (this way goes through Onion's audio server: start it again if needed)
-                if ! pidof audioserver >/dev/null 2>&1 && [ -x /mnt/SDCARD/miyoo/app/audioserver ]; then
-                    /mnt/SDCARD/miyoo/app/audioserver </dev/null >/dev/null 2>&1 &
-                    sleep 0.5
-                fi
-                # libpadsp.so needs Onion's own libraries next to it
-                LD_PRELOAD=/mnt/SDCARD/miyoo/lib/libpadsp.so \
-                    LD_LIBRARY_PATH="/mnt/SDCARD/miyoo/lib:/config/lib:/customer/lib:/lib:/usr/lib" \
-                    ./bin/rmaudio -d "$RMAUDIO_FIFO" $music </dev/null >/dev/null 2>>"$err" &
-                ;;
-        esac
+        # In a subshell so its PID stands for the whole pipeline: it ends when either
+        # side does. (rmaudio keeps the stream in step with the clock, so the player's
+        # buffers never fill up and button sounds stay instant.)
+        (
+            ./bin/rmaudio -d "$RMAUDIO_FIFO" $music -o - </dev/null 2>>"$err" \
+                | "$ffmpeg_cmd" -nostdin -hide_banner -loglevel error -fflags nobuffer -probesize 32 \
+                    -analyzeduration 0 -f s16le -ar 44100 -ac 2 -i pipe:0 -f alsa default >/dev/null 2>>"$err"
+        ) &
         RMAUDIO_PID=$!
-        # (rmaudio starts with a second of silence, so the player has to open the
-        # sound device within this time - and rmaudio reports one that's stuck)
+        # (the player has to open the sound device within this time)
         t=0
         while [ $t -lt 12 ] && kill -0 "$RMAUDIO_PID" 2>/dev/null && ! grep -qi "fail\|error\|cannot\|could not\|stalled" "$err" 2>/dev/null; do
             sleep 0.15
@@ -508,8 +501,11 @@ wifi_on() {
 update_statusbar() {
     local s b=""
     if wifi_on; then s="{WIFI}"; else s="{NOWIFI}"; fi
-    # Onion keeps the battery level here
-    [ -r /tmp/percBat ] && read -r b < /tmp/percBat
+    # The battery spruce reads (BATTERY comes from spruce's device settings)
+    local f
+    for f in ${BATTERY:+"$BATTERY/capacity"} /sys/class/power_supply/*[Bb]at*/capacity; do
+        [ -r "$f" ] && read -r b < "$f" && break
+    done
     case "$b" in ''|*[!0-9]*) ;; *) s="$s {BATT:$b}" ;; esac
     local kb=$(free_space_kb /mnt/SDCARD)
     case "$kb" in ''|*[!0-9]*) ;; *) s="$s $(format_size $((kb * 1024)) | tr -d ' ')" ;; esac
@@ -707,7 +703,7 @@ shutdown_app() {
     stop_renderer
     stop_audio
     stop_input
-    exit 0
+    exit "${APP_EXIT:-0}"
 }
 
 invalidate_game_cache() {
@@ -766,13 +762,6 @@ stop_cancel_listener() {
     kill_tree "$CANCEL_LISTENER_PID"
     CANCEL_LISTENER_PID=""
     flush_keys
-}
-
-# Onion caches each game list in <folder>_cache6.db / _cache2.db (see Onion's
-# reset_list.sh). Deleting them makes new or removed games show up straight away.
-refresh_onion_list() {
-    local dir="$ROMS_DIR/$1"
-    rm -f "$dir/${1}_cache6.db" "$dir/${1}_cache2.db" "$dir/miyoocache.bin"
 }
 
 # The games in a ROM folder, sorted. rmls reads the folder once; "ls -p" looked up
@@ -1068,6 +1057,13 @@ get_libretro_system() {
         "ZXS") echo "Sinclair%20-%20ZX%20Spectrum" ;;
         "CPC") echo "Amstrad%20-%20CPC" ;;
         "DOS") echo "DOS" ;;
+        "N64") echo "Nintendo%20-%20Nintendo%2064" ;;
+        "DC") echo "Sega%20-%20Dreamcast" ;;
+        "PSP") echo "Sony%20-%20PlayStation%20Portable" ;;
+        "SATURN") echo "Sega%20-%20Saturn" ;;
+        "JAGUAR") echo "Atari%20-%20Jaguar" ;;
+        "FBNEO") echo "FBNeo%20-%20Arcade%20Games" ;;
+        "MAME2003PLUS") echo "MAME" ;;
         *) echo "" ;;
     esac
 }
@@ -1100,13 +1096,13 @@ get_auto_extensions() {
         VB) echo "vb" ;;
         # CD-based systems: .bin also carries a matching .cue, fetched automatically
         # at download time (same mechanism as PS1).
-        SEGACD|NEOCD|PCFX) echo "bin" ;;
+        SEGACD|NEOCD|PCFX|SATURN) echo "bin" ;;
         FDS) echo "fds" ;;
         POKEFAMI) echo "min" ;;
         NDS) echo "nds" ;;
         N64) echo "n64|z64|v64" ;;
         MSX|MSX2) echo "rom|dsk|cas" ;;
-        PICO) echo "p8" ;;
+        PICO|PICO8) echo "p8" ;;
         FIFTYTWO00) echo "a52" ;;
         AMIGA) echo "adf|lha" ;;
         C64) echo "d64|t64|crt" ;;
@@ -1115,6 +1111,7 @@ get_auto_extensions() {
         32X) echo "32x" ;;
         TIC80) echo "tic" ;;
         VECTREX) echo "vec" ;;
+        JAGUAR) echo "j64|jag" ;;
         # Onion's own folder names
         MS) echo "sms" ;;
         ATARI) echo "a26" ;;
@@ -1225,6 +1222,15 @@ console_name_var() {
         "MEGADUCK") CONSOLE_NAME="Mega Duck" ;;
         "FAIRCHILD") CONSOLE_NAME="Channel F" ;;
         "ATARIST") CONSOLE_NAME="Atari ST" ;;
+        # spruce's own folder names
+        "SATURN") CONSOLE_NAME="Sega Saturn" ;;
+        "PICO8") CONSOLE_NAME="Pico-8" ;;
+        "FBNEO") CONSOLE_NAME="FinalBurn Neo" ;;
+        "MAME2003PLUS") CONSOLE_NAME="MAME 2003-Plus" ;;
+        "NAOMI") CONSOLE_NAME="Sega Naomi" ;;
+        "ATOMISWAVE") CONSOLE_NAME="Atomiswave" ;;
+        "JAGUAR") CONSOLE_NAME="Atari Jaguar" ;;
+        "EIGHTHUNDRED") CONSOLE_NAME="Atari 800" ;;
         *) CONSOLE_NAME="$1" ;;
     esac
 }
@@ -1660,8 +1666,8 @@ state_settings() {
             sfx) hint="Button sound volume - all the way down turns them off" ;;
             home) hint="Main menu as big tiles or a plain list" ;;
             motion) hint="Slides, fades and the floating cover" ;;
-            start) hint="What RomManager opens on from Onion (after a game: where you were)" ;;
-            launcher) hint="ON: games started here, and Menu, come back to RomManager" ;;
+            start) hint="What RomManager opens on from spruce (after a game: where you were)" ;;
+            launcher) hint="ON: games started here come back to RomManager" ;;
             items) hint="How many rows a list shows" ;;
             scrape) hint="Fetch box art for each game you download" ;;
             cache) hint="How long repo game lists are kept before re-reading" ;;
@@ -1751,15 +1757,17 @@ state_settings() {
 state_credits() {
     if [ "$UI_RENDER_NEEDED" -eq 1 ]; then
         {
-            echo "RomManager $RM_VERSION for OnionOS"
+            echo "RomManager $RM_VERSION for spruceOS"
             echo "Made by plusCloud: design, the app, the screen,"
             echo "  sound and button engines, repos, downloads"
             echo "Contributions by brenonsc: file-format detection,"
             echo "  cover prefetch, .cue downloads, reliability fixes"
+            echo "Ported to spruceOS by brenonsc: new 64-bit screen,"
+            echo "  button and sound engines, spruce game launching"
             echo "Icons by Bernig"
             echo "Box art: the Libretro thumbnail project"
             echo "Uses stb_image / stb_truetype (Sean Barrett), minimp3"
-            echo "Thanks to the OnionOS team"
+            echo "Thanks to the OnionOS and spruce teams"
             echo "Only download games you own - RomManager comes"
             echo "  with no games, just the sources you add"
         } > "$CACHE_DIR/credits.list"
@@ -1960,32 +1968,10 @@ refresh_dl_consoles() {
     done | sort -f -t'|' -k3,3 > "$CACHE_DIR/dl_consoles.list"
 }
 
-# Console icons for cover flow, from Onion's emulator settings (each config.json has
-# the ROM folder and an icon). "FOLDER|icon" lines, made once.
-build_console_icons() {
-    local out="$CACHE_DIR/console_icons.txt"
-    [ -f "$out" ] && return
-    awk '
-        function flush() {
-            if (rp != "" && ic != "") {
-                if (ic !~ /^\//) ic = dir "/" ic
-                print rp "|" ic
-            }
-            rp = ""; ic = ""
-        }
-        FNR == 1 { flush(); dir = FILENAME; sub(/\/[^\/]*$/, "", dir) }
-        { sub(/\r$/, "") }
-        /"rompath"[ \t]*:/ { v = $0; sub(/^[^:]*:[ \t]*"/, "", v); sub(/".*$/, "", v); sub(/\/+$/, "", v)
-                             n = split(v, p, "/"); rp = toupper(p[n]) }
-        /"icon"[ \t]*:/ { v = $0; sub(/^[^:]*:[ \t]*"/, "", v); sub(/".*$/, "", v); ic = v }
-        END { flush() }' /mnt/SDCARD/Emu/*/config.json /mnt/SDCARD/RApp/*/config.json \
-        /mnt/SDCARD/App/PackageManager/data/*/*/*/*/config.json 2>/dev/null > "$out"
-}
-
 # Console pictures: RomManager's own set (ui/consoles, from the Wasteland theme by
-# Bernig - silhouettes by Dreambrace), so it looks the same whatever Onion theme is on.
-# Folder -> picture name; a console not listed here tries its folder name, then the
-# icon Onion's own settings give it.
+# Bernig - silhouettes by Dreambrace), so it looks the same whatever theme is on.
+# Folder -> picture name; a console not listed here tries its folder name, and one
+# with no picture at all shows its name in a frame ("TEXT:").
 CONSOLE_ICON_MAP="GBA gba GB gb GBC gbc SGB sgb FC fc NES fc FDS fds SFC sfc SNES sfc SATELLAVIEW satella
 SUFAMI sufami MD md GENESIS md GG gg MS ms SMS ms SEGACD segacd THIRTYTWOX 32x 32X 32x SEGASGONE segasgone
 PCE pce PCECD pcecd SGFX sgfx NEOGEO neogeo NEOCD neocd NGP ngp NGPC ngp ARCADE arcade CPS1 cps1
@@ -1993,21 +1979,20 @@ CPS2 cps2 CPS3 cps3 PS ps WS ws WSC ws ATARI atari ATARI2600 atari SEVENTYEIGHTH
 FIFTYTWOHUNDRED 5200 LYNX lynx ATARILYNX lynx ATARIST atarist VB vb POKE poke POKEFAMI poke NDS nds
 DOS dos PORTS ports GW gw MSX msx MSX2 msx PICO pico AMIGA amiga COMMODORE c64 C64 c64 SCUMMVM scummvm
 TIC tic TIC80 tic VECTREX vectrex COLECO col INTELLIVISION itv SUPERVISION supervision VIDEOPAC vdp
-ODYSSEY ody ZXS zxs CPC cpc MEGADUCK megaduck FAIRCHILD fairchild"
+ODYSSEY ody ZXS zxs CPC cpc MEGADUCK megaduck FAIRCHILD fairchild
+PICO8 pico FBNEO arcade MAME2003PLUS arcade EIGHTHUNDRED atari MSU1 sfc MSUMD md A30PORTS ports"
 
 # Cover-flow lines for a console list: $1 list ("FOLDER|count|name" lines, or "+DL|n|label"
 # for the Downloads row), $2 selected, $3 total. One awk for all of it: a few programs
 # started per row is what made the console lists lag.
 append_console_flow() {
     local list="$1" sel="$2" total="$3"
-    build_console_icons
     UI_FRAME_BUF="${UI_FRAME_BUF}COVERFLOW:$sel:$total:$STATE\n$(awk -F'|' -v lo=$((sel - 6)) -v hi=$((sel + 6)) \
         -v sel="$sel" -v dir="/mnt/SDCARD/App/RomManager/ui/consoles" -v map="$CONSOLE_ICON_MAP" '
         BEGIN {
             n = split(map, m, /[ \n]+/)
             for (i = 1; i < n; i += 2) icon[m[i]] = m[i + 1]
         }
-        FILENAME == ARGV[1] { onion[$1] = $2; next }
         {
             i = FNR - 1
             if (i < lo || i > hi) next
@@ -2015,13 +2000,13 @@ append_console_flow() {
             if ($1 != "+DL") {
                 f = toupper($1)
                 p = dir "/" ((f in icon) ? icon[f] : tolower(f)) ".png"
-                if ((getline line < p) <= 0) p = (f in onion) ? onion[f] : "BLANK"
+                if ((getline line < p) <= 0) p = "TEXT:" f
                 close(p)
             }
             printf "COVER:%d:%s\n", i, p
             if (i == sel) label = $3
         }
-        END { printf "CFLABEL:%s\n", label }' "$CACHE_DIR/console_icons.txt" "$list")\n"
+        END { printf "CFLABEL:%s\n", label }' "$list")\n"
 }
 
 # Where you were in each console's list, so going back in lands on the same game.
@@ -2856,7 +2841,6 @@ dl_one() {
             fi
         fi
         rm -f "$CACHE_DIR/.qart_$id.png"
-        refresh_onion_list "$folder"
         # Recent downloads: newest first, without an older entry for the same game
         { echo "$title|$folder|$file"
           awk -F'|' -v t="$title" -v d="$folder" '!($1 == t && $2 == d)' "$RECENT_DL_FILE" 2>/dev/null | head -n 19
@@ -2980,7 +2964,7 @@ dl_clear_unfinished() {
 need_wifi() {
     wifi_on && return 0
     play_sound "back"
-    ask_dialog "Wi-Fi is off" "Turn it on in Onion: press Menu, then" "Settings > Network > Wi-Fi." -- "OK"
+    ask_dialog "Wi-Fi is off" "Turn it on in spruce's menu:" "Settings > WiFi." -- "OK"
     return 1
 }
 
@@ -3514,95 +3498,40 @@ state_confirm_single_scrape() {
 
 # Lists the files that belong to a game: the file itself, plus its disc companions -
 # the tracks a .cue sheet points at, or the .cue sheet next to a .bin.
-# Onion's emulator for a ROM folder: the Emu/*/config.json whose "rompath" points at
-# Roms/<folder>. Prints the emulator's launch script.
+# spruce's emulator for a ROM folder: Emu/<folder> (the same name, in any case).
+# Prints its launch script - as spruce runs it, Emu/<folder>/../../spruce/... unresolved:
+# spruce's launcher works out the console from that path.
 find_emulator() {
-    local folder="$1" cfg
-    for cfg in /mnt/SDCARD/Emu/*/config.json /mnt/SDCARD/RApp/*/config.json; do
+    local dir cfg launch
+    for dir in /mnt/SDCARD/Emu/*/; do
+        dir="${dir%/}"
+        [ "$(echo "${dir##*/}" | tr 'a-z' 'A-Z')" = "$(echo "$1" | tr 'a-z' 'A-Z')" ] || continue
+        cfg="$dir/config.json"
         [ -f "$cfg" ] || continue
-        if tr -d '\r' < "$cfg" | awk -v f="$folder" '
-            /"rompath"/ { v = $0; sub(/^[^:]*:[ \t]*"/, "", v); sub(/".*$/, "", v); sub(/\/+$/, "", v)
-                          n = split(v, p, "/"); if (toupper(p[n]) == toupper(f)) found = 1 }
-            END { exit !found }'; then
-            local dir="${cfg%/config.json}"
-            local launch=$(tr -d '\r' < "$cfg" | awk '/"launch"/ { v = $0; sub(/^[^:]*:[ \t]*"/, "", v); sub(/".*$/, "", v); print v; exit }')
-            [ -f "$dir/${launch:-launch.sh}" ] || continue
-            echo "$dir/${launch:-launch.sh}"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Onion ships every emulator as a package, but only the ones turned on in its Package
-# Manager are copied into /mnt/SDCARD/Emu. This finds the (not yet enabled) package for
-# a ROM folder in the Package Manager's store. Prints "layer|package".
-find_emulator_package() {
-    local folder="$1" layer cfg rest
-    for layer in Emu RApp; do
-        for cfg in /mnt/SDCARD/App/PackageManager/data/$layer/*/$layer/*/config.json; do
-            [ -f "$cfg" ] || continue
-            if tr -d '\r' < "$cfg" | awk -v f="$folder" '
-                /"rompath"/ { v = $0; sub(/^[^:]*:[ \t]*"/, "", v); sub(/".*$/, "", v); sub(/\/+$/, "", v)
-                              n = split(v, p, "/"); if (toupper(p[n]) == toupper(f)) found = 1 }
-                END { exit !found }'; then
-                rest="${cfg#/mnt/SDCARD/App/PackageManager/data/$layer/}"
-                echo "$layer|${rest%%/*}"
-                return 0
-            fi
-        done
-    done
-    return 1
-}
-
-# Turns an emulator package on the way Onion's Package Manager does: with Onion's own
-# install script (which copies the package onto the SD card), or a plain copy.
-enable_emulator_package() {
-    local layer="$1" pkg="$2" data="/mnt/SDCARD/App/PackageManager/data/$1" f
-    if [ -f /mnt/SDCARD/.tmp_update/script/pacman_install.sh ]; then
-        sh /mnt/SDCARD/.tmp_update/script/pacman_install.sh "$data" "$pkg" >/dev/null 2>&1
-    else
-        for f in "$data/$pkg"/*; do
-            cp -rf "$f" /mnt/SDCARD/
-        done
-    fi
-    sync
-}
-
-# Makes sure Onion has an emulator for a ROM folder, offering to turn it on if it's
-# only in the Package Manager. $2: "launch" or "download" (changes the wording).
-# Returns 0 when one is there.
-ensure_emulator() {
-    local folder="$1" why="$2" name=$(get_console_name "$1")
-    [ -n "$(find_emulator "$folder")" ] && return 0
-    local found=$(find_emulator_package "$folder")
-    if [ -z "$found" ]; then
-        [ "$why" = "launch" ] && show_message "Onion has no emulator for $name on this device." 2.5
-        return 1
-    fi
-    local pkg="${found#*|}"
-    play_sound "change"
-    if [ "$why" = "launch" ]; then
-        ask_dialog "Turn on $name?" "Its emulator is off in Onion's" "Package Manager. Turn on:" "$(echo "$pkg" | cut -c 1-34)" -- "Turn on" "Cancel"
-    else
-        ask_dialog "Turn on $name?" "Onion won't show this game until" "its emulator is on. Turn on:" "$(echo "$pkg" | cut -c 1-34)" -- "Turn on" "Later"
-    fi
-    [ "$DIALOG_RESULT" = "0" ] || return 1
-    busy_frame "Turning on $name..."
-    enable_emulator_package "${found%%|*}" "$pkg"
-    if [ -n "$(find_emulator "$folder")" ]; then
-        play_sound "confirm"
-        show_message "$name is on! It shows in Onion's game list." 1.8
+        launch=$(tr -d '\r' < "$cfg" | awk '/"launch"/ { v = $0; sub(/^[^:]*:[ \t]*"/, "", v); sub(/".*$/, "", v); print v; exit }')
+        [ -f "$dir/${launch:-launch.sh}" ] || continue
+        echo "$dir/${launch:-launch.sh}"
         return 0
-    fi
-    play_sound "back"
-    show_message "Couldn't turn it on - use Onion's Package Manager." 2.5
+    done
     return 1
 }
 
-# Starts a game by handing it to Onion: Onion runs .tmp_update/cmd_to_run.sh after this
-# app closes, and /tmp/quick_switch tells it to keep that command instead of going
-# back to the main menu - the way Onion's own GameSwitcher starts games.
+# Makes sure spruce has an emulator for a ROM folder. $2: "launch" or "download".
+# Returns 0 when it does.
+ensure_emulator() {
+    local name=$(get_console_name "$1")
+    [ -n "$(find_emulator "$1")" ] && return 0
+    [ "$2" = "launch" ] && show_message "spruce has no emulator for $name on this device." 2.5
+    return 1
+}
+
+# Starts a game the way spruce's menu does. spruce knows what is running by
+# /tmp/cmd_to_run.sh, so the game's line goes there, in spruce's own form (its game
+# switcher and power-off save read the ROM from it), and in lastgame.lock (so
+# autoresume after a power-off goes back to the game). The app then closes and the
+# supervisor at the top of this script runs the game (exit 76: come back afterwards,
+# Settings > Default Launcher; 77: don't) - only it can, as spruce runs nothing else
+# until this app ends.
 launch_game() {
     local folder="$1" file="$2" emu
     ensure_emulator "$folder" launch || return 1
@@ -3626,86 +3555,35 @@ launch_game() {
         UI_FRAME_BUF="${UI_FRAME_BUF}COVERFLOW:0:1:launch\nCOVER:0:$art\nCFLABEL:${file%.*}\n"
     fi
     render_ui
-    # Onion runs this file once the app has closed. It has to stay ONE line of the
-    # form  ... "emulator" "rom"  - Onion reads the ROM's path from it line by line
-    # (an extra line here once made every game "not found"). With Default Launcher on,
-    # the line starts with a shell trap that opens RomManager again when the game ends.
-    local hook=""
-    if [ "$LAUNCHER" = "1" ]; then
-        write_after_game_hook
-        hook="trap 'sh $RM_AFTER_HOOK' EXIT; "
-    fi
-    printf '%sLD_PRELOAD=/mnt/SDCARD/miyoo/lib/libpadsp.so "%s" "%s"\n' "$hook" "$emu" "$ROMS_DIR/$folder/$file" \
-        > /mnt/SDCARD/.tmp_update/cmd_to_run.sh
-    add_onion_recent "$folder" "$file" "$emu"
-    touch /tmp/quick_switch
+    # RomManager's own line, put back when the game ends
+    [ -s /tmp/rm_app_cmd.sh ] || cp -f /tmp/cmd_to_run.sh /tmp/rm_app_cmd.sh 2>/dev/null
+    # (escaped as spruce's menu does it: \ " $ `)
+    local rom=$(printf '%s' "$ROMS_DIR/$folder/$file" | sed 's/[\\"$`]/\\&/g')
+    printf 'chmod a+x "%s";"%s" "%s"\n' "$emu" "$emu" "$rom" > /tmp/cmd_to_run.sh.rm
+    # (a new file renamed into place: spruce is still reading the old one)
+    mv -f /tmp/cmd_to_run.sh.rm /tmp/cmd_to_run.sh
+    cp -f /tmp/cmd_to_run.sh "${FLAGS_DIR:-/mnt/SDCARD/spruce/flags}/lastgame.lock" 2>/dev/null
+    add_spruce_recent "$folder" "$ROMS_DIR/$folder/$file"
     sync
+    APP_EXIT=77
+    [ "$LAUNCHER" = "1" ] && APP_EXIT=76
     shutdown_app
 }
 
-# Puts the game at the top of Onion's recent list (Roms/recentlist.json), the list
-# Onion's game switcher and Recents show - Onion's menu does this for games it starts.
-# Same line format as Onion's (one JSON object per line, newest first), with the
-# rompath written the way Onion writes it (emulator folder/../../Roms/...), and any
-# older entry for the game removed.
-add_onion_recent() {
-    local folder="$1" file="$2" emu="$3" list=/mnt/SDCARD/Roms/recentlist.json
-    [ -f /mnt/SDCARD/.tmp_update/config/.showRecents ] || list=/mnt/SDCARD/Roms/recentlist-hidden.json
-    local emudir="${emu%/*}"
-    json_esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-    local label=$(json_esc "${file%.*}")
-    local rom=$(json_esc "$emudir/../../Roms/$folder/$file")
-    local img=$(json_esc "$emudir/../../Roms/$folder/Imgs/${file%.*}.png")
-    local launch=$(json_esc "$emu")
-    {
-        printf '{"label":"%s","launch":"%s","type":5,"imgpath":"%s","rompath":"%s"}\n' "$label" "$launch" "$img" "$rom"
-        [ -f "$list" ] && awk -v t="/Roms/$folder/$(json_esc "$file")\"" 'index($0, t) == 0' "$list"
-    } > "$list.rm_tmp" && mv -f "$list.rm_tmp" "$list"
-    sync
+# Puts the game at the top of spruce's Recents (Saves/pyui-recents.json, newest
+# first), the list spruce's menu and game switcher show - as spruce's menu does for
+# games it starts.
+add_spruce_recent() {
+    local list=/mnt/SDCARD/Saves/pyui-recents.json
+    command -v jq >/dev/null 2>&1 || return
+    { [ -s "$list" ] && cat "$list" || echo "[]"; } | jq --arg p "$2" --arg s "$1" \
+        '[{rom_file_path: $p, game_system_name: $s, display_name: null}] + map(select(.rom_file_path != $p))' \
+        > "$list.rm_tmp" 2>/dev/null && [ -s "$list.rm_tmp" ] && mv -f "$list.rm_tmp" "$list"
+    rm -f "$list.rm_tmp"
 }
 
-# ---- Default Launcher ----
-# While RomManager is open, games started from it come back to it - and so does B in
-# Onion's game switcher (Menu in a game, or Menu here). Closing RomManager ends that:
-# nothing opens it again until you do.
-#
-# The game's command line in cmd_to_run.sh starts with "trap 'sh /tmp/rm_after.sh' EXIT",
-# so when the game ends that script puts RomManager's command back in cmd_to_run.sh and
-# touches /tmp/quick_switch - Onion then runs it instead of going to its menu. The hook
-# lives in /tmp (gone after a restart) and its path doesn't mention /mnt/SDCARD/App/,
-# which Onion would take for an app launch.
-RM_AFTER_HOOK=/tmp/rm_after.sh
-RM_RELAUNCH='cd /mnt/SDCARD/App/RomManager; sh ./launch.sh'
-
-write_after_game_hook() {
-    cat > "$RM_AFTER_HOOK" <<'HOOK'
-#!/bin/sh
-# RomManager (Settings > Default Launcher): runs when a game started from RomManager ends
-c=/mnt/SDCARD/.tmp_update/cmd_to_run.sh
-if [ -f "$c" ] && ! grep -q "rm_after" "$c"; then
-    # Onion's game switcher already picked the next game: come back after that one
-    grep -q "/mnt/SDCARD/Roms/\|/\.\./\.\./Roms/" "$c" && sed -i "1s|^|trap 'sh /tmp/rm_after.sh' EXIT; |" "$c"
-    exit 0
-fi
-echo 'cd /mnt/SDCARD/App/RomManager; sh ./launch.sh' > "$c"
-touch /tmp/quick_switch
-# (tells RomManager it is coming back from a game: no boot screen, same screen as before)
-touch /tmp/rm_return
-# Menu was pressed in the game: Onion shows its game switcher first - watch it
-if [ -f /mnt/SDCARD/.tmp_update/.runGameSwitcher ]; then
-    w=/mnt/SDCARD/App/RomManager/lib/switcher_watch.sh
-    if command -v setsid >/dev/null 2>&1; then
-        setsid sh "$w" </dev/null >/dev/null 2>&1 &
-    else
-        sh "$w" </dev/null >/dev/null 2>&1 &
-    fi
-fi
-sync
-exit 0
-HOOK
-}
-
-# Menu: Onion's game switcher, the same as in Onion's own menu
+# Menu: spruce's game switcher. RomManager closes and spruce's menu opens straight on
+# it (games started from there don't come back here).
 open_game_switcher() {
     [ -n "$SWITCHER_ASKING" ] && return 1
     if dl_worker_alive; then
@@ -3716,25 +3594,13 @@ open_game_switcher() {
         [ "$DIALOG_RESULT" = "0" ] || { play_sound "back"; return 1; }
     fi
     play_sound "confirm"
-    touch /mnt/SDCARD/.tmp_update/.runGameSwitcher
-    if [ "$LAUNCHER" = "1" ]; then
-        # Onion runs the switcher once we close; our command stays in cmd_to_run.sh so
-        # Onion comes back here afterwards, and the watcher puts it back if B in the
-        # switcher deletes it
-        write_after_game_hook
-        echo "$RM_RELAUNCH" > /mnt/SDCARD/.tmp_update/cmd_to_run.sh
-        if command -v setsid >/dev/null 2>&1; then
-            setsid sh ./lib/switcher_watch.sh </dev/null >/dev/null 2>&1 &
-        else
-            sh ./lib/switcher_watch.sh </dev/null >/dev/null 2>&1 &
-        fi
-    fi
+    touch /mnt/SDCARD/App/PyUI/pyui_gs_trigger
     sync
     shutdown_app
 }
 
 # The screen you were on, saved on the way out: coming back from a game always returns
-# there; opening RomManager from Onion only with Open To > Where I Left Off
+# there; opening RomManager from spruce only with Open To > Where I Left Off
 save_spot() {
     # (field 3: the game name only - download-list lines carry "|size" after it)
     echo "$STATE|$INST_CHOSEN_FOLDER|$(sed -n "$((INST_GAME_INDEX + 1))p" "$CACHE_DIR/current_games.cache" 2>/dev/null | cut -d"|" -f1)|$INST_GAME_INDEX|$FAV_INDEX|$RECENT_INDEX|$DL_CONSOLE_INDEX|$SET_INDEX|$MAIN_INDEX|$DL_CHOSEN_FOLDER|$DL_INDEX" \
@@ -3828,7 +3694,6 @@ delete_game() {
     done
     awk -F'|' -v d="$folder" -v t="${file%.*}" '!($2 == d && $1 == t)' "$RECENT_DL_FILE" > "$RECENT_DL_FILE.tmp" 2>/dev/null
     mv -f "$RECENT_DL_FILE.tmp" "$RECENT_DL_FILE"
-    refresh_onion_list "$folder"
     force_update_local_consoles
 }
 
@@ -5341,7 +5206,7 @@ boot_frame() {
     build_theme
     UI_FRAME_BUF="${UI_FRAME_BUF}BOOT:v$RM_VERSION\nBOOT_STEP:$1\nBOOT_PROGRESS:$2\nBOOT_TIP:$BOOT_TIP\n"
     UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_CREDIT:by plusCloud\n"
-    UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_THANKS:with help from brenonsc  ·  icons by Bernig\n"
+    UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_THANKS:spruce port by brenonsc  ·  icons by Bernig\n"
     [ -n "$BOOT_INFO1" ] && UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_INFO:$BOOT_INFO1\n"
     [ -n "$BOOT_INFO2" ] && UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_INFO:$BOOT_INFO2\n"
     render_ui
