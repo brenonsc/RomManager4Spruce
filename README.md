@@ -40,7 +40,7 @@ This is the spruceOS port of [plusCloud's RomManager](https://github.com/Plus-Cl
 - **Animations can be turned off** in Settings.
 
 ### Under the hood
-- A **screen engine written in C** that draws straight to the screen: page flipping (no tearing), box art decoded on a second CPU core so scrolling never waits for it, and the original 640x480 layout scaled up sharp to the Brick's 1024x768.
+- A **screen engine written in C** that draws straight to the screen: page flipping (no tearing), box art decoded on a second CPU core so scrolling never waits for it, and the original 640x480 layout scaled up sharp to the Brick's 1024x768 - and widened to fill the Smart Pro's 16:9 screen.
 - **No CPU used when idle** - the screen only redraws when something changes.
 - Separate small programs for the **buttons** (presses are queued, never missed) and the **sound** (music and button sounds mixed, so the music never pauses; played through spruce's audio, so Bluetooth and USB audio work too).
 - **Crash-safe:** problems are logged to `caches/rommanager.log` and RomManager restarts itself.

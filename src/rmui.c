@@ -22,7 +22,8 @@
 //   BOOT:version   BOOT_STEP / BOOT_PROGRESS / BOOT_INFO / BOOT_TIP / BOOT_CREDIT / BOOT_THANKS
 // Acting at once: TOAST:ok|err|info:text   LETTER:x   FLUSH_CACHE   QUIT
 // /tmp/rm_dlprog ("percent|downloads left") feeds {DL}.
-// Everything is laid out on a 640x480 grid (the Miyoo Mini's screen) and scaled to fit.
+// Everything is laid out on a grid 480 tall (the Miyoo Mini's 640x480) and scaled to fit;
+// a wide screen (the Smart Pro's 16:9) gets a wider grid, not black bars.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -59,7 +60,9 @@
 // ---------------------------------------------------------------- screen and canvas
 
 static int W, H;          // screen, in pixels
-static float S = 1;       // 640x480 grid -> screen
+static float S = 1;       // grid -> screen
+static float GW = 640;    // grid width: 640, more on screens wider than 4:3
+static float CX = 320;    // its middle
 static int OX, OY;        // where the grid starts on screen
 static uint32_t *canvas;  // what is being drawn (0xAARRGGBB, always opaque)
 static uint32_t *prevbuf, *outbuf, *shown;
@@ -245,7 +248,7 @@ static Img img_resize(Img s, int w, int h) {
     return d;
 }
 
-enum { FIT, STRETCH };
+enum { FIT, STRETCH, COVER };
 
 // A picture file, shrunk (or grown) to fit bw x bh - or stretched to it
 static Img img_load(const char *path, int bw, int bh, int mode) {
@@ -257,6 +260,16 @@ static Img img_load(const char *path, int bw, int bh, int mode) {
         unsigned char *p = d + i * 4;
         uint32_t a = p[3];
         s.px[i] = a << 24 | (p[0] * a / 255) << 16 | (p[1] * a / 255) << 8 | (p[2] * a / 255);
+    }
+    if (mode == COVER) { // fills bw x bh keeping its shape: the overflow is cut off
+        float k = MAX((float)bw / w, (float)bh / h);
+        int rw = MAX(bw, (int)ceilf(w * k)), rh = MAX(bh, (int)ceilf(h * k));
+        Img big = img_resize(s, rw, rh), r = img_new(bw, bh);
+        for (int y = 0; y < bh; y++)
+            memcpy(r.px + (size_t)y * bw, big.px + (size_t)(y + (rh - bh) / 2) * rw + (rw - bw) / 2, (size_t)bw * 4);
+        free(big.px);
+        free(d);
+        return r;
     }
     int dw = bw, dh = bh;
     if (mode == FIT) {
@@ -709,7 +722,7 @@ static void icon_download(float cx, float cy, float s, uint32_t c) {
 }
 
 static void spinner(float cx, float cy, float r, float dot, uint32_t c) {
-    int phase = (int)(t_now / 80) % 12;
+    int phase = freeze ? 0 : (int)(t_now / 80) % 12; // (previews: always the same picture)
     for (int i = 0; i < 12; i++) {
         float a = i * (float)M_PI / 6;
         int k = (i - phase + 12) % 12;
@@ -742,7 +755,7 @@ static void draw_statusbar(const char *s) {
         else wid[i] = text_w(size, parts[i]);
         total += wid[i] + (i ? gap : 0);
     }
-    float x = X(626) - total;
+    float x = X(GW - 14) - total;
     for (int i = 0; i < np; i++) {
         const char *p = parts[i];
         if (!strcmp(p, "{DL}")) {
@@ -821,7 +834,7 @@ static void draw_footer(const char *s) {
             x += text_w(size, label) + gap;
         }
         if (!draw) {
-            float avail = X(626) - X(22), used = x - X(22);
+            float avail = X(GW - 14) - X(22), used = x - X(22);
             if (used > avail) size = MAX(PX(13), (int)(size * avail / used));
         }
     }
@@ -840,7 +853,7 @@ static void draw_chrome(int kind) { // 0 background only, 1 + header and status,
         return;
     }
     noclip();
-    const Img *bg = pic(bg_path, W, H, STRETCH, 1);
+    const Img *bg = pic(bg_path, W, H, COVER, 1);
     // (opaque: on some screens a see-through pixel shows what's under the framebuffer)
     for (size_t i = 0; i < (size_t)W * H; i++) canvas[i] = bg ? over(C_BG, bg->px[i], 256) : C_BG;
     if (kind >= 1) {
@@ -849,10 +862,10 @@ static void draw_chrome(int kind) { // 0 background only, 1 + header and status,
         int ts = PX(30);
         float tw = text_w(ts, title);
         text_bold(ts, X(114) - tw / 2, baseline(ts, Y(30)), C_TEXT, title);
-        fill(X(10), Y(55), L(620), MAX(2, L(2)), C_HL);
-        fill(X(10), Y(404), L(620), L(30), with_a(C_BG, 0xF2));
+        fill(X(10), Y(55), L(GW - 20), MAX(2, L(2)), C_HL);
+        fill(X(10), Y(404), L(GW - 20), L(30), with_a(C_BG, 0xF2));
     }
-    if (kind == 2) fill(X(10), Y(72), L(620), L(330), with_a(C_BG, 0xE6));
+    if (kind == 2) fill(X(10), Y(72), L(GW - 20), L(330), with_a(C_BG, 0xE6));
     if (!chrome[kind]) chrome[kind] = malloc((size_t)W * H * 4);
     memcpy(chrome[kind], canvas, (size_t)W * H * 4);
     COPY(chrome_key[kind], key);
@@ -907,7 +920,7 @@ static void draw_row(const char *s, int x0, int x1, int y, int h, int size, uint
 static void draw_list(const Frame *f) {
     int top = 74, bottom = 400;
     if (f->progress >= 0) {
-        int x = X(30), y = Y(82), w = L(580), h = L(16);
+        int x = X(30), y = Y(82), w = L(GW - 60), h = L(16);
         rrect_line(x, y, w, h, h / 2, MAX(1, L(1.5f)), C_HL);
         int in = MAX(2, L(3));
         rrect(x + in, y + in, (w - 2 * in) * CLAMP(f->progress, 0, 100) / 100, h - 2 * in, (h - 2 * in) / 2, C_HL);
@@ -916,7 +929,7 @@ static void draw_list(const Frame *f) {
     if (!f->nitems) return;
     float rh = MIN(30.f, (float)(bottom - top) / f->nitems);
     int size = MIN(PX(base_size), (int)(L(rh) * .78f));
-    int x0 = X(14), x1 = f->art ? X(346) : X(626);
+    int x0 = X(14), x1 = f->art ? X(GW - 294) : X(GW - 14);
     int ly = Y(top), lh = Y(bottom) - ly;
     clip(x0, ly, x1 - x0, lh + L(2));
     int sel = f->highlight >= 0 ? f->list_start + f->highlight : -1;
@@ -959,14 +972,14 @@ static void draw_art(const Frame *f) {
     int bw = L(264), bh = L(312);
     const Img *im = pic(f->art_path, bw, bh, FIT, 0);
     if (!im) return;
-    int x = X(490) - im->w / 2, y = Y(240) - im->h / 2;
+    int x = X(GW - 150) - im->w / 2, y = Y(240) - im->h / 2;
     blit(im, x, y, im->w, im->h, 256, 256);
 }
 
 static void draw_busy(const Frame *f) {
-    spinner(X(320), Y(210), L(24), L(3.6f), C_HL);
+    spinner(X(CX), Y(210), L(24), L(3.6f), C_HL);
     int size = PX(base_size);
-    text_center(size, X(320), Y(272), C_TEXT, f->busy_text);
+    text_center(size, X(CX), Y(272), C_TEXT, f->busy_text);
 }
 
 // Console pictures (and "TEXT:name", a console with none) sit in a square frame
@@ -978,7 +991,7 @@ static void cover_path(const char *p, char *out, size_t n) {
 }
 
 static void draw_coverflow(const Frame *f) {
-    clip(X(10), Y(72), L(620), L(330));
+    clip(X(10), Y(72), L(GW - 20), L(330));
     // far ones first, the chosen one on top
     int order[MAXCOVERS], n = 0;
     for (int i = 0; i < f->ncovers; i++)
@@ -1000,7 +1013,7 @@ static void draw_coverflow(const Frame *f) {
         float bw = icon ? 200 : 188, bh = icon ? 216 : 264;
         float sc = 1 - .32f * MIN(ad, 1) - .07f * CLAMP(ad - 1, 0, 2);
         float off = (d < 0 ? -1 : 1) * (ad <= 1 ? ad * 168 : 168 + (ad - 1) * 118);
-        float cx = 320 + off, cy = (icon ? 222 : 211) + (ad < .5f ? bob * (1 - ad * 2) : 0);
+        float cx = CX + off, cy = (icon ? 222 : 211) + (ad < .5f ? bob * (1 - ad * 2) : 0);
         char full[TXT + 64];
         cover_path(path, full, sizeof full);
         int named = !strncmp(path, "TEXT:", 5);
@@ -1027,17 +1040,17 @@ static void draw_coverflow(const Frame *f) {
         }
     }
     noclip();
-    fill(X(50), Y(362), L(540), L(32), with_a(C_BG, 0xD8));
+    fill(X(50), Y(362), L(GW - 100), L(32), with_a(C_BG, 0xD8));
     int size = PX(21);
     float tw = text_w(size, f->cf_label);
-    if (tw > L(520)) size = MAX(PX(14), (int)(size * L(520) / tw));
-    clip(X(56), Y(362), L(528), L(32));
-    text_center(size, X(320), Y(378), C_TEXT, f->cf_label);
+    if (tw > L(GW - 120)) size = MAX(PX(14), (int)(size * L(GW - 120) / tw));
+    clip(X(56), Y(362), L(GW - 112), L(32));
+    text_center(size, X(CX), Y(378), C_TEXT, f->cf_label);
     noclip();
 }
 
 static void draw_osk(const Frame *f) {
-    int bx = X(20), by = Y(80), bw = L(600), bh = L(38), size = PX(base_size);
+    int bx = X(20), by = Y(80), bw = L(GW - 40), bh = L(38), size = PX(base_size);
     rrect(bx, by, bw, bh, L(6), with_a(C_BG, 0xF0));
     rrect_line(bx, by, bw, bh, L(6), MAX(1, L(2)), C_HL);
     // the typed text (its end, if long), the rest of a suggestion greyed out, a cursor
@@ -1051,7 +1064,7 @@ static void draw_osk(const Frame *f) {
     if (freeze || (t_now / 530) % 2 == 0) fill((int)x + L(1), by + L(8), L(10), bh - L(16), C_HL);
     need_slow = 1;
     noclip();
-    float kw = (600 - 6 * 6) / 7.f, kh = (264 - 5 * 6) / 6.f;
+    float kw = (GW - 40 - 6 * 6) / 7, kh = (264 - 5 * 6) / 6.f;
     int ks = PX(18);
     for (int i = 0; i < f->nkeys; i++) {
         int c = i % 7, r = i / 7;
@@ -1076,7 +1089,7 @@ static void draw_tiles(const Frame *f) {
         }
         float g = CLAMP(tile_glow[i], 0, 1);
         int col = i % 3, row = i / 3;
-        float tx = 24 + col * 204, ty = 78 + row * 170, tw = 186, th = 150;
+        float tw = (GW - 82) / 3, th = 150, tx = 24 + col * (tw + 18), ty = 78 + row * 170;
         float grow = g * 3 - (i == f->tile_sel && f->tile_press ? 6 : 0);
         int x = X(tx - grow), y = Y(ty - grow), w = L(tw + 2 * grow), h = L(th + 2 * grow), r = L(9);
         if (g > 0) {
@@ -1104,9 +1117,9 @@ static void draw_tiles(const Frame *f) {
 static void draw_boot(const Frame *f) {
     int ts = PX(50);
     float tw = text_w(ts, title);
-    text_bold(ts, X(320) - tw / 2, baseline(ts, Y(166)), C_TEXT, title);
-    fill(X(320) - (int)(tw / 2), Y(196), (int)tw, MAX(2, L(2)), C_HL);
-    text_center(PX(14), X(320), Y(217), with_a(C_DIM, 0xC0), f->boot_ver);
+    text_bold(ts, X(CX) - tw / 2, baseline(ts, Y(166)), C_TEXT, title);
+    fill(X(CX) - (int)(tw / 2), Y(196), (int)tw, MAX(2, L(2)), C_HL);
+    text_center(PX(14), X(CX), Y(217), with_a(C_DIM, 0xC0), f->boot_ver);
     float target = CLAMP(f->boot_progress, 0, 100);
     if (freeze || !motion || boot_shown > target) boot_shown = target;
     else {
@@ -1114,18 +1127,18 @@ static void draw_boot(const Frame *f) {
         if (target - boot_shown > .3f) need_fast = 1;
         else boot_shown = target;
     }
-    int x = X(150), y = Y(267), w = L(340), h = L(14), in = MAX(2, L(3));
+    int x = X(CX - 170), y = Y(267), w = L(340), h = L(14), in = MAX(2, L(3));
     rrect_line(x, y, w, h, h / 2, MAX(1, L(1.5f)), C_HL);
     rrect(x + in, y + in, (int)((w - 2 * in) * boot_shown / 100), h - 2 * in, (h - 2 * in) / 2, C_HL);
     int ss = PX(16);
     float sw = text_w(ss, f->boot_step);
-    float sx = X(320) - (sw + L(22)) / 2;
+    float sx = X(CX) - (sw + L(22)) / 2;
     if (f->boot_progress < 100) spinner(sx + L(7), Y(299), L(6), L(1.4f), C_HL);
     text(ss, sx + L(22), baseline(ss, Y(299)), C_TEXT, f->boot_step);
-    for (int i = 0; i < f->nboot_info; i++) text_center(PX(base_size), X(320), Y(346 + i * 28), C_TEXT, f->boot_info[i]);
-    text_center(PX(15), X(320), Y(423), with_a(C_DIM, 0xA8), f->boot_tip);
-    text_center(PX(15), X(320), Y(447), with_a(C_DIM, 0xC8), f->boot_credit);
-    text_center(PX(11), X(320), Y(466), with_a(C_DIM, 0x90), f->boot_thanks);
+    for (int i = 0; i < f->nboot_info; i++) text_center(PX(base_size), X(CX), Y(346 + i * 28), C_TEXT, f->boot_info[i]);
+    text_center(PX(15), X(CX), Y(423), with_a(C_DIM, 0xA8), f->boot_tip);
+    text_center(PX(15), X(CX), Y(447), with_a(C_DIM, 0xC8), f->boot_credit);
+    text_center(PX(11), X(CX), Y(466), with_a(C_DIM, 0x90), f->boot_thanks);
 }
 
 static void draw_dialog(const Frame *f) {
@@ -1136,13 +1149,13 @@ static void draw_dialog(const Frame *f) {
     float w = CLAMP(maxw / S + 64, 420, 600);
     float h = 64 + f->ndlines * 28 + 66;
     float sc = .94f + .06f * p;
-    float x = 320 - w * sc / 2, y = 240 - h * sc / 2;
+    float x = CX - w * sc / 2, y = 240 - h * sc / 2;
     g_alpha = (int)(256 * p);
     rrect(X(x), Y(y), L(w * sc), L(h * sc), L(12), with_a(C_BG, 0xF8));
     rrect_line(X(x), Y(y), L(w * sc), L(h * sc), L(12), MAX(2, L(2)), C_HL);
-    text_center(size, X(320), Y(y + 30 * sc), C_TEXT, f->dtitle);
+    text_center(size, X(CX), Y(y + 30 * sc), C_TEXT, f->dtitle);
     fill(X(x + 16), Y(y + 48 * sc), L((w - 32) * sc), MAX(1, L(1)), with_a(C_DIM, 0x60));
-    for (int i = 0; i < f->ndlines; i++) text_center(size, X(320), Y(y + (76 + i * 28) * sc), C_TEXT, f->dlines[i]);
+    for (int i = 0; i < f->ndlines; i++) text_center(size, X(CX), Y(y + (76 + i * 28) * sc), C_TEXT, f->dlines[i]);
     int nb = MAX(1, f->ndbtns);
     float gap = 22, bw = (w - 32 - (nb - 1) * gap) / nb, by = y + (64 + f->ndlines * 28 + 16) * sc;
     for (int i = 0; i < f->ndbtns; i++) {
@@ -1166,7 +1179,7 @@ static void draw_toast(void) {
     float w = MIN(600.f, text_w(size, toast_text) / S + 64);
     float y = -44 + 54 * p;
     uint32_t c = !strcmp(toast_kind, "err") ? C_ERR : C_HL;
-    int x = X(320 - w / 2);
+    int x = X(CX - w / 2);
     rrect(x, Y(y), L(w), L(36), L(10), with_a(C_BG, 0xF4));
     rrect_line(x, Y(y), L(w), L(36), L(10), MAX(2, L(2)), c);
     int cy = Y(y + 18);
@@ -1186,7 +1199,7 @@ static void draw_letter(void) {
     if (!freeze && t > 650) { letter[0] = 0; return; }
     g_alpha = freeze || t < 450 ? 256 : (int)(256 * (1 - (t - 450) / 200.f));
     need_fast = !freeze;
-    int x = X(265), y = Y(182), s = L(110);
+    int x = X(CX - 55), y = Y(182), s = L(110);
     rrect(x, y, s, s, L(14), with_a(C_BG, 0xEC));
     rrect_line(x, y, s, s, L(14), MAX(2, L(2)), C_HL);
     text_center(PX(72), x + s / 2.f, y + s / 2, C_TEXT, letter);
@@ -1229,7 +1242,7 @@ static void draw_scene(const Frame *f) {
     }
     if (perf) draw_perf(0);
     draw_statusbar(f->statusbar);
-    clip(X(10), Y(404), L(616), L(30));
+    clip(X(10), Y(404), L(GW - 24), L(30));
     text(PX(base_size), X(22), baseline(PX(base_size), Y(419)), C_TEXT, f->status);
     noclip();
     draw_footer(f->footer);
@@ -1479,7 +1492,8 @@ static void screen_close(void) {
 static void screen_size(int w, int h) {
     W = w, H = h;
     S = MIN(W / 640.f, H / 480.f);
-    OX = (int)((W - 640 * S) / 2), OY = (int)((H - 480 * S) / 2);
+    GW = MAX(640.f, W / S), CX = GW / 2;
+    OX = (int)((W - GW * S) / 2), OY = (int)((H - 480 * S) / 2);
     canvas = calloc((size_t)W * H, 4);
     prevbuf = calloc((size_t)W * H, 4);
     outbuf = calloc((size_t)W * H, 4);
