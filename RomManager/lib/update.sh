@@ -12,7 +12,8 @@
 # when Wi-Fi is on, downloads a new version and installs it at the next start - no
 # questions asked. Settings > Check for Updates does it all at once, after asking.
 
-UPDATE_REPO="Plus-Cloud/RomManager"
+# (the spruceOS port's own releases: the original's are built for the Miyoo Mini)
+UPDATE_REPO="brenonsc/RomManager-4-Spruce"
 APP_DIR="/mnt/SDCARD/App/RomManager"
 UPDATE_INFO="$CACHE_DIR/update_available.txt"   # version|zip url|size|sha256:...
 UPDATE_DIR="$CACHE_DIR/update"
