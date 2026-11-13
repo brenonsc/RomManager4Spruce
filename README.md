@@ -71,11 +71,11 @@ This is the spruceOS port of [plusCloud's RomManager](https://github.com/Plus-Cl
 
 | | |
 | :---: | :---: |
-| <img width="380" alt="Boot screen" src="screenshots/01_boot.png" /><br><sub>Boot screen</sub> | <img width="380" alt="Consoles in cover flow" src="screenshots/03_consoles.png" /><br><sub>Consoles in cover flow, with RomManager's own icons</sub> |
+| <img width="380" alt="Boot screen" src="screenshots/01_boot.png" /><br><sub>Boot screen, on the Brick Pro</sub> | <img width="380" alt="Consoles in cover flow" src="screenshots/03_consoles.png" /><br><sub>Consoles in cover flow, with RomManager's own icons</sub> |
 | <img width="380" alt="A source's game list" src="screenshots/05_download_list.png" /><br><sub>A source's games - check marks on the ones you have</sub> | <img width="380" alt="Download pop-up" src="screenshots/06_download_confirm.png" /><br><sub>Size and free space before you download</sub> |
 | <img width="380" alt="Download queue" src="screenshots/08_download_queue.png" /><br><sub>The download queue, running in the background</sub> | <img width="380" alt="Settings" src="screenshots/10_settings_launcher.png" /><br><sub>Every setting explained on the status line</sub> |
 
-<p align="center"><sub>Screenshots from the original Miyoo Mini version - the spruce port keeps its look. The games shown are homebrew, with box art from the Libretro thumbnails project; game counts and sources are sample data.</sub></p>
+<p align="center"><sub>The boot screen is from the spruce port (1024x768); the others are from the original Miyoo Mini version - the port keeps its look. The games shown are homebrew, with box art from the Libretro thumbnails project; game counts and sources are sample data.</sub></p>
 
 ## 🗺️ Adding sources
 
