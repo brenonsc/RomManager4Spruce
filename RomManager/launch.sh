@@ -5205,8 +5205,8 @@ boot_frame() {
     [ "$RETURNING" = "1" ] && return
     build_theme
     UI_FRAME_BUF="${UI_FRAME_BUF}BOOT:v$RM_VERSION\nBOOT_STEP:$1\nBOOT_PROGRESS:$2\nBOOT_TIP:$BOOT_TIP\n"
-    UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_CREDIT:by plusCloud\n"
-    UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_THANKS:spruce port by brenonsc  ·  icons by Bernig\n"
+    UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_CREDIT:port by brenonsc\n"
+    UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_THANKS:based on plusCloud's RomManager  ·  icons by Bernig\n"
     [ -n "$BOOT_INFO1" ] && UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_INFO:$BOOT_INFO1\n"
     [ -n "$BOOT_INFO2" ] && UI_FRAME_BUF="${UI_FRAME_BUF}BOOT_INFO:$BOOT_INFO2\n"
     render_ui
